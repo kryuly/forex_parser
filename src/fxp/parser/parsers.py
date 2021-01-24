@@ -1,9 +1,12 @@
 import os
+import re
 import json
 import pickle
 import requests
 from bs4 import BeautifulSoup as BS
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 
 from fxp.parser import DEFAULT_USER_AGENT, HOST, PREVIEW_URL, BASE_DIR
 
@@ -22,13 +25,14 @@ class BaseMeta(metaclass=_Base):
     """Base Meta class"""    
 
 class BaseParser(BaseMeta):
-    __metaclass__ = ABC
-
+    
+    #__metaclass__ = ABC
+    _user_agent = DEFAULT_USER_AGENT
     def __init__(self, user_agent: str = None):
         self._user_agent = user_agent if user_agent is not None else DEFAULT_USER_AGENT
 
     def _get_page(self, url):
-        print(self.page)
+        #print(self.page)
         if hasattr(self, "page"):
             if self.page < 1:
                 raise ValueError("Page is < 1")
@@ -40,9 +44,9 @@ class BaseParser(BaseMeta):
             },
         )
         #print(response.url)
-        if hasattr(self, "page"):
-            if not response.url.endswith(str(self.page)) and self.page != 1:
-                raise ValueError("Page is very big")
+        # if hasattr(self, "page"):
+        #     if not response.url.endswith(str(self.page)) and self.page != 1:
+        #         raise ValueError("Page is very big")
         if response.status_code == 200:
             return BS(response.text, features="html.parser")
         raise ValueError("Response not 200")
@@ -68,7 +72,7 @@ class Preview(BaseParser):
         super().__init__(kwargs.get("user_agent"))
         self.__num_page = kwargs.get("page") if kwargs.get("page") is not None else 1
         # if kwargs.get("page") < 1:
-        #     raise ValueError("Page is < 1")
+            #raise ValueError("Page is < 1")
         self.__links = []
 
     def get_links(self):
@@ -101,8 +105,11 @@ class Preview(BaseParser):
         finally:
             self.__cursor +=1
 
-    #def __getitem__(self, index):
-        #print(index)
+    def __getitem__(self, index):
+        # obj = Preview()
+        # obj._Preview__links[links] = [1, 4]
+        # return obj
+        return self.__links[index]
 
     def save_to_file(self, name):
         path = os.path.join(BASE_DIR, name + ".bin")
@@ -112,14 +119,15 @@ class Preview(BaseParser):
         path = os.path.join(BASE_DIR, name + ".json")
         json.dump(self.__links, open(path, "w"))
 
-class NewParser(BaseParser):
-    def __init__(self, url):
-        self.url = url
+class NewsParser(BaseParser):
+    def __init__(self, user_agent: str = None):
+        self.date_pattern = re.compile(r"([A-Za-z ,]+[\dAMP:]+)")
+        super().__init__(user_agent)
         self.news = {}
 
-    def get_news(self):
+    def __call__(self, url):
         try:
-            html = self._get_page(self._url)
+            html = self._get_page(url)
         except ValueError as error:
             print(error)
         else:
@@ -127,18 +135,41 @@ class NewParser(BaseParser):
             if  box is not None:
                 self.news["head"] = box.find("h1", attrs={"class":"articleHeader"}).text
                 box_date = box.find("div", attrs={"class": "contentSectionDetails"})
-                news_date = box_date.find("span").text
+                self.news["date"] = (
+                    datetime.strptime(
+                    "".join(self.date_pattern.findall(box_date.find("span").text)), 
+                    "%b %d, %Y %H:%M%p",
+                )
+                .replace(tzinfo=timezone.utc)
+                .timestamp()
+                )
+                article = box.find("div", attrs={"class": "articlePage"})
+                text_blocks = article.find_all("p")
+                self.news["text"] = "\n".join([p.text for p in text_blocks]).strip()
+                self.news["img_link"] = article.find("img").attrs["src"]
+        self.save_to_json(
+            datetime.fromtimestamp(self.news["date"]).strftime("%Y/%m/%d/%H_%M")
+        )
+
+    def save_to_json(self, name):
+        path = os.path.join(BASE_DIR, name + ".json")
+        dirs = os.path.split(path)[:-1]
+        try:
+            os.makedirs(os.path.join(*dirs))
+        except Exception as error:
+            print(error)
+        json.dump(self.news, open(path, "w"), ensure_ascii=False)
+
 
 
 if __name__ == "__main__":
-    parser = Preview(page=2000)
-    parser.get_links()
-    print(parser._Preview__links)
-    parser.save_to_json("tmp_links_2")
-    parser.save_to_file("tmp_links_2")
-    for link in parser:
-        print(link)
-    #parser[1]
-    #parser[1:2]
-    #parser[1:2:1]
-    #parser["key"]
+    #from multiprocessing import Lock
+    pool = ThreadPoolExecutor(max_workers=14)
+    for page in range(1,5):
+        links = Preview(page=page)
+        links.get_links()
+        news = NewsParser()
+        start = datetime.now()
+        news_from_page = pool.map(news, links)
+        list(news_from_page)
+        print(datetime.now()-start)
